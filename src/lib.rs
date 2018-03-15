@@ -38,10 +38,11 @@ impl ThreadQueue {
 			let sender_map = self.sender_map.clone();
 
 			std::thread::spawn(move || {
+				while sender_map.lock().unwrap().len() == 0 {
+					std::thread::sleep(std::time::Duration::from_millis(1));
+				}
 				while sender_map.lock().unwrap().len() > 0 {
-					let id = sr.recv().unwrap();
-
-					match id {
+					match sr.recv().unwrap() {
 						Notify::Started(id) => {
 							match current_id.lock() {
 								Ok(ref mut current_id) if id == **current_id => {
@@ -63,8 +64,12 @@ impl ThreadQueue {
 											map.remove(&id);
 											let id = id + 1;
 											**current_id = id;
-												map.get(&id)
-													.unwrap().send(Notify::Go).unwrap();
+											match map.get(&id) {
+												Some(ref sender) => {
+													sender.send(Notify::Go).unwrap();
+												},
+												None => ()
+											}
 										},
 										Err(ref e) => {
 											panic!(format!("{:?}",e));
@@ -86,12 +91,12 @@ impl ThreadQueue {
 
 		let (cs,cr) = mpsc::channel();
 
+		self.sender_map.lock()?.insert(self.last_id, cs.clone());
+
 		let ss = match self.sender {
 			Some(ref ss) => ss.clone(),
 			None => panic!("Sender is not initialized."),
 		};
-
-		self.sender_map.lock()?.insert(self.current_id, cs.clone());
 
 		let f = Arc::new(f);
 		let id = self.last_id;
