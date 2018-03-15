@@ -5,18 +5,19 @@ use std::sync::PoisonError;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::collections::HashMap;
+use std::num::Wrapping;
 
 #[derive(Clone, Copy, Eq, PartialOrd, PartialEq, Debug)]
 pub enum Notify {
-	Started(u64),
+	Started(u32),
 	Go,
-	Terminated(u64),
+	Terminated(u32),
 }
 pub struct ThreadQueue {
-	sender_map:Arc<Mutex<HashMap<u64,Sender<Notify>>>>,
+	sender_map:Arc<Mutex<HashMap<u32,Sender<Notify>>>>,
 	sender:Option<Sender<Notify>>,
-	current_id:u64,
-	last_id:u64,
+	current_id:u32,
+	last_id:u32,
 }
 impl ThreadQueue {
 	pub fn new() -> ThreadQueue {
@@ -29,7 +30,7 @@ impl ThreadQueue {
 	}
 
 	pub fn submit<F>(&mut self,f:F) ->
-		Result<(),PoisonError<MutexGuard<HashMap<u64,Sender<Notify>>>>>
+		Result<(),PoisonError<MutexGuard<HashMap<u32,Sender<Notify>>>>>
 		where F: Fn(), Arc<F>: Send + 'static  {
 
 		if self.sender_map.lock()?.len() == 0 {
@@ -62,7 +63,8 @@ impl ThreadQueue {
 									match sender_map.lock() {
 										Ok(mut map) => {
 											map.remove(&id);
-											let id = id + 1;
+											let id = Wrapping(id) + Wrapping(1);
+											let id = id.0;
 											**current_id = id;
 											match map.get(&id) {
 												Some(ref sender) => {
@@ -100,8 +102,9 @@ impl ThreadQueue {
 
 		let f = Arc::new(f);
 		let id = self.last_id;
+		let last_id = Wrapping(self.last_id) + Wrapping(1);
 
-		self.last_id = self.last_id + 1;
+		self.last_id = last_id.0;
 
 		std::thread::spawn(move || {
 			ss.send(Notify::Started(id)).unwrap();
