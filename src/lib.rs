@@ -104,7 +104,7 @@ impl ThreadQueue {
 
 			f();
 
-			cs.send(Notify::Terminated(id)).unwrap();
+			ss.send(Notify::Terminated(id)).unwrap();
 		});
 
 		Ok(())
