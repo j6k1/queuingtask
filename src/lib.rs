@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::collections::HashMap;
 
+#[derive(Clone, Copy, Eq, PartialOrd, PartialEq, Debug)]
 pub enum Notify {
 	Started(u64),
 	Go,
