@@ -17,16 +17,16 @@ pub enum Notify {
 pub struct ThreadQueue {
 	sender_map:Arc<Mutex<HashMap<u32,Sender<Notify>>>>,
 	sender:Option<Sender<Notify>>,
-	current_id:u32,
-	last_id:u32,
+	current_id:Arc<Mutex<u32>>,
+	last_id:Arc<Mutex<u32>>,
 }
 impl ThreadQueue {
 	pub fn new() -> ThreadQueue {
 		ThreadQueue {
 			sender_map:Arc::new(Mutex::new(HashMap::new())),
 			sender:None,
-			current_id:0,
-			last_id:0,
+			current_id:Arc::new(Mutex::new(0)),
+			last_id:Arc::new(Mutex::new(0)),
 		}
 	}
 
@@ -36,11 +36,12 @@ impl ThreadQueue {
 
 		if self.sender_map.lock()?.len() == 0 {
 			let (ss,sr) = mpsc::channel();
-			let current_id = Arc::new(Mutex::new(self.current_id));
+			let current_id = self.current_id.clone();
+			let last_id = self.last_id.clone();
 			let sender_map = self.sender_map.clone();
 
 			std::thread::spawn(move || {
-				while sender_map.lock().unwrap().len() == 0 {
+				while *last_id.lock().unwrap() == *current_id.lock().unwrap() {
 					std::thread::sleep(std::time::Duration::from_millis(1));
 				}
 				while sender_map.lock().unwrap().len() > 0 {
@@ -92,30 +93,36 @@ impl ThreadQueue {
 			self.sender = Some(ss)
 		}
 
-		let (cs,cr) = mpsc::channel();
+		match self.last_id.lock() {
+			Ok(ref mut last_id) => {
+				let (cs,cr) = mpsc::channel();
 
-		self.sender_map.lock()?.insert(self.last_id, cs.clone());
+				self.sender_map.lock()?.insert(**last_id, cs.clone());
 
-		let ss = match self.sender {
-			Some(ref ss) => ss.clone(),
-			None => panic!("Sender is not initialized."),
-		};
+				let ss = match self.sender {
+					Some(ref ss) => ss.clone(),
+					None => panic!("Sender is not initialized."),
+				};
 
-		let id = self.last_id;
-		let last_id = Wrapping(self.last_id) + Wrapping(1);
+				let id = **last_id;
+				let next_id = Wrapping(**last_id) + Wrapping(1);
 
-		self.last_id = last_id.0;
+				**last_id = next_id.0;
 
-		let r = std::thread::spawn(move || {
-			ss.send(Notify::Started(id)).unwrap();
-			cr.recv().unwrap();
+				let r = std::thread::spawn(move || {
+					ss.send(Notify::Started(id)).unwrap();
+					cr.recv().unwrap();
 
-			let r = f();
+					let r = f();
 
-			ss.send(Notify::Terminated(id)).unwrap();
-			r
-		});
-
-		Ok(r)
+					ss.send(Notify::Terminated(id)).unwrap();
+					r
+				});
+				Ok(r)
+			},
+			Err(ref e) => {
+				panic!(format!("{:?}",e));
+			}
+		}
 	}
 }
