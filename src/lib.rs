@@ -4,6 +4,7 @@ use std::sync::MutexGuard;
 use std::sync::PoisonError;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
 use std::collections::HashMap;
 use std::num::Wrapping;
 
@@ -29,9 +30,9 @@ impl ThreadQueue {
 		}
 	}
 
-	pub fn submit<F>(&mut self,f:F) ->
-		Result<(),PoisonError<MutexGuard<HashMap<u32,Sender<Notify>>>>>
-		where F: Fn(), Arc<F>: Send + 'static  {
+	pub fn submit<F,T>(&mut self,f:F) ->
+		Result<JoinHandle<T>,PoisonError<MutexGuard<HashMap<u32,Sender<Notify>>>>>
+		where F: FnOnce() -> T, F: Send + 'static, T: Send + 'static {
 
 		if self.sender_map.lock()?.len() == 0 {
 			let (ss,sr) = mpsc::channel();
@@ -100,21 +101,21 @@ impl ThreadQueue {
 			None => panic!("Sender is not initialized."),
 		};
 
-		let f = Arc::new(f);
 		let id = self.last_id;
 		let last_id = Wrapping(self.last_id) + Wrapping(1);
 
 		self.last_id = last_id.0;
 
-		std::thread::spawn(move || {
+		let r = std::thread::spawn(move || {
 			ss.send(Notify::Started(id)).unwrap();
 			cr.recv().unwrap();
 
-			f();
+			let r = f();
 
 			ss.send(Notify::Terminated(id)).unwrap();
+			r
 		});
 
-		Ok(())
+		Ok(r)
 	}
 }
