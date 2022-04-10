@@ -1,6 +1,16 @@
 [package]
 name = "queuingtask"
 version = "0.1.0"
-authors = ["jinpu"]
+authors = ["jinpu <nanasi18@gmail.com>"]
+description = "queueingtask is a library for running different threads in order in Rust"
+documentation = "https://docs.rs/queuingtask"
+homepage = "https://crates.io/crates/queuingtask"
+repository = "https://github.com/j6k1/queuingtask"
+
+readme = "README.md"
+
+keywords = ["taskqueue"]
+categories = []
+license = "MIT"
 
 [dependencies]
