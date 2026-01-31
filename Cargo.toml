@@ -1,6 +1,6 @@
 [package]
 name = "queuingtask"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["jinpu <nanasi18@gmail.com>"]
 description = "queueingtask is a library for running different threads in order in Rust"
 documentation = "https://docs.rs/queuingtask"
