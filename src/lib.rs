@@ -1,128 +1,120 @@
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use std::sync::PoisonError;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 use std::collections::HashMap;
-use std::num::Wrapping;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone, Copy, Eq, PartialOrd, PartialEq, Debug)]
 pub enum Notify {
-	Started(u32),
+	Started(usize),
 	Go,
-	Terminated(u32),
+	Terminated(usize),
+	Quit,
 }
 pub struct ThreadQueue {
-	sender_map:Arc<Mutex<HashMap<u32,Sender<Notify>>>>,
-	sender:Option<Sender<Notify>>,
-	current_id:Arc<Mutex<u32>>,
-	last_id:Arc<Mutex<u32>>,
+	sender_map:Arc<RwLock<HashMap<usize,Sender<Notify>>>>,
+	sender:Sender<Notify>,
+	last_id:Arc<AtomicUsize>,
+	working:Arc<AtomicBool>
 }
 impl ThreadQueue {
 	pub fn new() -> ThreadQueue {
-		ThreadQueue {
-			sender_map:Arc::new(Mutex::new(HashMap::new())),
-			sender:None,
-			current_id:Arc::new(Mutex::new(0)),
-			last_id:Arc::new(Mutex::new(0)),
-		}
-	}
+		let (ss,sr) = mpsc::channel();
+		let last_id = Arc::new(AtomicUsize::new(0));
+		let working = Arc::new(AtomicBool::new(true));
 
-	pub fn submit<F,T>(&mut self,f:F) ->
-		Result<JoinHandle<T>,PoisonError<MutexGuard<HashMap<u32,Sender<Notify>>>>>
-		where F: FnOnce() -> T, F: Send + 'static, T: Send + 'static {
+		let sender_map = Arc::new(RwLock::new(HashMap::<usize,Sender<Notify>>::new()));
 
-		if self.sender_map.lock()?.len() == 0 {
-			let (ss,sr) = mpsc::channel();
-			let current_id = self.current_id.clone();
-			let last_id = self.last_id.clone();
-			let sender_map = self.sender_map.clone();
+		{
+			let sender_map = Arc::clone(&sender_map);
+			let working = Arc::clone(&working);
+
+			let mut current_id = 0usize;
 
 			std::thread::spawn(move || {
-				while *last_id.lock().unwrap() == *current_id.lock().unwrap() {
-					std::thread::sleep(std::time::Duration::from_millis(1));
-				}
-				while sender_map.lock().unwrap().len() > 0 {
+				while working.load(Ordering::Acquire) {
 					match sr.recv().unwrap() {
 						Notify::Started(id) => {
-							match current_id.lock() {
-								Ok(ref mut current_id) if id == **current_id => {
-									sender_map.lock()
-										.unwrap().get(&id)
-										.unwrap().send(Notify::Go).unwrap();
-								},
-								Ok(_) => (),
-								Err(ref e) => {
-									panic!(format!("{:?}",e));
-								}
+							if id == current_id {
+								sender_map.read()
+									.unwrap().get(&id)
+									.unwrap().send(Notify::Go).unwrap();
 							}
 						},
 						Notify::Terminated(id) => {
-							match current_id.lock() {
-								Ok(ref mut current_id) if id == **current_id => {
-									match sender_map.lock() {
-										Ok(mut map) => {
-											map.remove(&id);
-											let id = Wrapping(id) + Wrapping(1);
-											let id = id.0;
-											**current_id = id;
-											match map.get(&id) {
-												Some(ref sender) => {
-													sender.send(Notify::Go).unwrap();
-												},
-												None => ()
-											}
-										},
-										Err(ref e) => {
-											panic!(format!("{:?}",e));
+							if id == current_id {
+								match sender_map.write() {
+									Ok(mut map) => {
+										map.remove(&id);
+										let id = id + 1;
+										current_id = id;
+										match map.get(&id) {
+											Some(ref sender) => {
+												sender.send(Notify::Go).unwrap();
+											},
+											None => ()
 										}
-									};
-								},
-								Ok(_) => (),
-								Err(ref e) => {
-									panic!(format!("{:?}",e));
-								}
+									},
+									Err(ref e) => {
+										panic!("{:?}", e);
+									}
+								};
 							}
 						},
+						Notify::Quit if sender_map.read().unwrap().is_empty()=> {
+							break;
+						},
+						Notify::Quit => {
+							panic!("There are still threads waiting to be processed.");
+						}
 						_ => (),
 					}
 				}
 			});
-			self.sender = Some(ss)
 		}
 
-		match self.last_id.lock() {
-			Ok(ref mut last_id) => {
-				let (cs,cr) = mpsc::channel();
-
-				self.sender_map.lock()?.insert(**last_id, cs.clone());
-
-				let ss = match self.sender {
-					Some(ref ss) => ss.clone(),
-					None => panic!("Sender is not initialized."),
-				};
-
-				let id = **last_id;
-				let next_id = Wrapping(**last_id) + Wrapping(1);
-
-				**last_id = next_id.0;
-
-				let r = std::thread::spawn(move || {
-					ss.send(Notify::Started(id)).unwrap();
-					cr.recv().unwrap();
-
-					let r = f();
-
-					ss.send(Notify::Terminated(id)).unwrap();
-					r
-				});
-				Ok(r)
-			},
-			Err(ref e) => {
-				panic!(format!("{:?}",e));
-			}
+		ThreadQueue {
+			sender_map:sender_map,
+			sender:ss,
+			last_id:last_id,
+			working:working
 		}
+	}
+
+	pub fn submit<F,T>(&mut self,f:F) ->
+		Result<JoinHandle<T>,PoisonError<RwLockWriteGuard<'_,HashMap<usize,Sender<Notify>>>>>
+		where F: FnOnce() -> T, F: Send + 'static, T: Send + 'static {
+
+		let (cs,cr) = mpsc::channel();
+
+		let last_id = self.last_id.fetch_add(1, Ordering::SeqCst);
+
+		{
+			self.sender_map.write()?.insert(last_id, cs.clone());
+		}
+
+		let ss = self.sender.clone();
+
+		let id = last_id;
+
+		let r = std::thread::spawn(move || {
+			ss.send(Notify::Started(id)).unwrap();
+			cr.recv().unwrap();
+
+			let r = f();
+
+			ss.send(Notify::Terminated(id)).unwrap();
+			r
+		});
+
+		Ok(r)
+	}
+}
+impl Drop for ThreadQueue {
+	fn drop(&mut self) {
+		self.working.store(false, Ordering::Release);
+		let _ = self.sender.send(Notify::Quit);
 	}
 }
