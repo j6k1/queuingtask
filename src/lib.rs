@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use std::sync::PoisonError;
 use std::sync::mpsc;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,11 +17,14 @@ pub struct ThreadQueue {
 	sender_map:Arc<RwLock<HashMap<usize,Sender<Notify>>>>,
 	sender:Sender<Notify>,
 	last_id:Arc<AtomicUsize>,
-	working:Arc<AtomicBool>
+	working:Arc<AtomicBool>,
+	quit_receiver:Receiver<()>
 }
 impl ThreadQueue {
 	pub fn new() -> ThreadQueue {
 		let (ss,sr) = mpsc::channel();
+		let (quit_sender, quit_receiver) = mpsc::channel();
+
 		let last_id = Arc::new(AtomicUsize::new(0));
 		let working = Arc::new(AtomicBool::new(true));
 
@@ -64,6 +67,8 @@ impl ThreadQueue {
 							}
 						},
 						Notify::Quit if sender_map.read().unwrap().is_empty()=> {
+							quit_sender.send(()).unwrap();
+
 							break;
 						},
 						Notify::Quit => {
@@ -79,7 +84,8 @@ impl ThreadQueue {
 			sender_map:sender_map,
 			sender:ss,
 			last_id:last_id,
-			working:working
+			working:working,
+			quit_receiver:quit_receiver
 		}
 	}
 
@@ -115,6 +121,7 @@ impl ThreadQueue {
 impl Drop for ThreadQueue {
 	fn drop(&mut self) {
 		self.working.store(false, Ordering::Release);
-		let _ = self.sender.send(Notify::Quit);
+		self.sender.send(Notify::Quit).unwrap();
+		self.quit_receiver.recv().unwrap();
 	}
 }
