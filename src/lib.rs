@@ -18,6 +18,7 @@ pub struct ThreadQueue {
 	sender:Sender<Notify>,
 	last_id:Arc<AtomicUsize>,
 	working:Arc<AtomicBool>,
+	busy_count:Arc<AtomicUsize>,
 	quit_receiver:Receiver<()>
 }
 impl ThreadQueue {
@@ -27,12 +28,14 @@ impl ThreadQueue {
 
 		let last_id = Arc::new(AtomicUsize::new(0));
 		let working = Arc::new(AtomicBool::new(true));
+		let busy_count = Arc::new(AtomicUsize::new(0));
 
 		let sender_map = Arc::new(RwLock::new(HashMap::<usize,Sender<Notify>>::new()));
 
 		{
 			let sender_map = Arc::clone(&sender_map);
 			let working = Arc::clone(&working);
+			let busy_count = Arc::clone(&busy_count);
 
 			let mut current_id = 0usize;
 
@@ -64,7 +67,16 @@ impl ThreadQueue {
 										panic!("{:?}", e);
 									}
 								};
+
+								busy_count.fetch_sub(1, Ordering::Release);
+
+								if !working.load(Ordering::Acquire) && busy_count.load(Ordering::Acquire) == 0 {
+									break;
+								}
 							}
+						},
+						Notify::Quit if busy_count.load(Ordering::Acquire) > 0 => {
+
 						},
 						Notify::Quit if sender_map.read().unwrap().is_empty()=> {
 							quit_sender.send(()).unwrap();
@@ -85,6 +97,7 @@ impl ThreadQueue {
 			sender:ss,
 			last_id:last_id,
 			working:working,
+			busy_count:Arc::clone(&busy_count),
 			quit_receiver:quit_receiver
 		}
 	}
@@ -105,8 +118,14 @@ impl ThreadQueue {
 
 		let id = last_id;
 
+		let (on_start_sender,on_start_receiver) = mpsc::channel();
+
+		let busy_count = Arc::clone(&self.busy_count);
+
 		let r = std::thread::spawn(move || {
 			ss.send(Notify::Started(id)).unwrap();
+			busy_count.fetch_add(1, Ordering::Release);
+			on_start_sender.send(()).unwrap();
 			cr.recv().unwrap();
 
 			let r = f();
@@ -114,6 +133,8 @@ impl ThreadQueue {
 			ss.send(Notify::Terminated(id)).unwrap();
 			r
 		});
+
+		on_start_receiver.recv().unwrap();
 
 		Ok(r)
 	}
