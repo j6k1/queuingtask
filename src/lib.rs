@@ -40,7 +40,7 @@ impl ThreadQueue {
 			let mut current_id = 0usize;
 
 			std::thread::spawn(move || {
-				while working.load(Ordering::Acquire) {
+				while working.load(Ordering::Acquire) || busy_count.load(Ordering::Acquire) > 0 {
 					match sr.recv().unwrap() {
 						Notify::Started(id) => {
 							if id == current_id {
@@ -71,6 +71,7 @@ impl ThreadQueue {
 								busy_count.fetch_sub(1, Ordering::Release);
 
 								if !working.load(Ordering::Acquire) && busy_count.load(Ordering::Acquire) == 0 {
+									quit_sender.send(()).unwrap();
 									break;
 								}
 							}
@@ -141,8 +142,8 @@ impl ThreadQueue {
 }
 impl Drop for ThreadQueue {
 	fn drop(&mut self) {
-		self.working.store(false, Ordering::Release);
 		self.sender.send(Notify::Quit).unwrap();
+		self.working.store(false, Ordering::Release);
 		self.quit_receiver.recv().unwrap();
 	}
 }
