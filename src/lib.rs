@@ -39,7 +39,11 @@ impl ThreadQueue {
 
 			let mut current_id = 0usize;
 
+			let (ws,wr) = mpsc::channel();
+
 			std::thread::spawn(move || {
+				ws.send(()).unwrap();
+
 				while working.load(Ordering::Acquire) || busy_count.load(Ordering::Acquire) > 0 {
 					match sr.recv().unwrap() {
 						Notify::Started(id) => {
@@ -91,6 +95,8 @@ impl ThreadQueue {
 					}
 				}
 			});
+
+			wr.recv().unwrap();
 		}
 
 		ThreadQueue {
