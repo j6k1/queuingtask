@@ -19,12 +19,11 @@ pub struct ThreadQueue {
 	last_id:Arc<AtomicUsize>,
 	working:Arc<AtomicBool>,
 	busy_count:Arc<AtomicUsize>,
-	quit_receiver:Receiver<()>
+	worker_handler:Option<JoinHandle<()>>
 }
 impl ThreadQueue {
 	pub fn new() -> ThreadQueue {
 		let (ss,sr) = mpsc::channel();
-		let (quit_sender, quit_receiver) = mpsc::channel();
 
 		let last_id = Arc::new(AtomicUsize::new(0));
 		let working = Arc::new(AtomicBool::new(true));
@@ -32,7 +31,7 @@ impl ThreadQueue {
 
 		let sender_map = Arc::new(RwLock::new(HashMap::<usize,Sender<Notify>>::new()));
 
-		{
+		let h = {
 			let sender_map = Arc::clone(&sender_map);
 			let working = Arc::clone(&working);
 			let busy_count = Arc::clone(&busy_count);
@@ -41,10 +40,10 @@ impl ThreadQueue {
 
 			let (ws,wr) = mpsc::channel();
 
-			std::thread::spawn(move || {
+			let h = std::thread::spawn(move || {
 				ws.send(()).unwrap();
 
-				while working.load(Ordering::Acquire) || busy_count.load(Ordering::Acquire) > 0 {
+				loop {
 					match sr.recv().unwrap() {
 						Notify::Started(id) => {
 							if id == current_id {
@@ -75,7 +74,6 @@ impl ThreadQueue {
 								busy_count.fetch_sub(1, Ordering::Release);
 
 								if !working.load(Ordering::Acquire) && busy_count.load(Ordering::Acquire) == 0 {
-									quit_sender.send(()).unwrap();
 									break;
 								}
 							}
@@ -83,9 +81,7 @@ impl ThreadQueue {
 						Notify::Quit if busy_count.load(Ordering::Acquire) > 0 => {
 
 						},
-						Notify::Quit if sender_map.read().unwrap().is_empty()=> {
-							quit_sender.send(()).unwrap();
-
+						Notify::Quit if sender_map.read().unwrap().is_empty() => {
 							break;
 						},
 						Notify::Quit => {
@@ -97,7 +93,9 @@ impl ThreadQueue {
 			});
 
 			wr.recv().unwrap();
-		}
+
+			h
+		};
 
 		ThreadQueue {
 			sender_map:sender_map,
@@ -105,7 +103,7 @@ impl ThreadQueue {
 			last_id:last_id,
 			working:working,
 			busy_count:Arc::clone(&busy_count),
-			quit_receiver:quit_receiver
+			worker_handler:Some(h)
 		}
 	}
 
@@ -150,6 +148,8 @@ impl Drop for ThreadQueue {
 	fn drop(&mut self) {
 		self.sender.send(Notify::Quit).unwrap();
 		self.working.store(false, Ordering::Release);
-		self.quit_receiver.recv().unwrap();
+		self.worker_handler.take().map(|h| {
+			h.join().unwrap()
+		}).unwrap();
 	}
 }
