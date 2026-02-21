@@ -16,7 +16,7 @@ pub enum Notify {
 pub struct ThreadQueue {
 	sender_map:Arc<RwLock<HashMap<usize,Sender<Notify>>>>,
 	sender:Sender<Notify>,
-	last_id:Arc<AtomicUsize>,
+	last_id:Arc<RwLock<usize>>,
 	working:Arc<AtomicBool>,
 	busy_count:Arc<AtomicUsize>,
 	worker_handler:Option<JoinHandle<()>>
@@ -25,7 +25,7 @@ impl ThreadQueue {
 	pub fn new() -> ThreadQueue {
 		let (ss,sr) = mpsc::channel();
 
-		let last_id = Arc::new(AtomicUsize::new(0));
+		let last_id = Arc::new(RwLock::new(0));
 		let working = Arc::new(AtomicBool::new(true));
 		let busy_count = Arc::new(AtomicUsize::new(0));
 
@@ -113,35 +113,39 @@ impl ThreadQueue {
 
 		let (cs,cr) = mpsc::channel();
 
-		let last_id = self.last_id.fetch_add(1, Ordering::SeqCst);
+		match self.last_id.write().unwrap() {
+			mut last_id => {
+				{
+					self.sender_map.write()?.insert(*last_id, cs.clone());
+				}
 
-		{
-			self.sender_map.write()?.insert(last_id, cs.clone());
+				let ss = self.sender.clone();
+
+				let id = *last_id;
+
+				let (on_start_sender,on_start_receiver) = mpsc::channel();
+
+				let busy_count = Arc::clone(&self.busy_count);
+
+				let r = std::thread::spawn(move || {
+					ss.send(Notify::Started(id)).unwrap();
+					busy_count.fetch_add(1, Ordering::Release);
+					on_start_sender.send(()).unwrap();
+					cr.recv().unwrap();
+
+					let r = f();
+
+					ss.send(Notify::Terminated(id)).unwrap();
+					r
+				});
+
+				*last_id += 1;
+
+				on_start_receiver.recv().unwrap();
+
+				Ok(r)
+			}
 		}
-
-		let ss = self.sender.clone();
-
-		let id = last_id;
-
-		let (on_start_sender,on_start_receiver) = mpsc::channel();
-
-		let busy_count = Arc::clone(&self.busy_count);
-
-		let r = std::thread::spawn(move || {
-			ss.send(Notify::Started(id)).unwrap();
-			busy_count.fetch_add(1, Ordering::Release);
-			on_start_sender.send(()).unwrap();
-			cr.recv().unwrap();
-
-			let r = f();
-
-			ss.send(Notify::Terminated(id)).unwrap();
-			r
-		});
-
-		on_start_receiver.recv().unwrap();
-
-		Ok(r)
 	}
 }
 impl Drop for ThreadQueue {
