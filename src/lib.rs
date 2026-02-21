@@ -146,10 +146,11 @@ impl ThreadQueue {
 }
 impl Drop for ThreadQueue {
 	fn drop(&mut self) {
-		self.sender.send(Notify::Quit).unwrap();
+		let r = self.sender.send(Notify::Quit);
 		self.working.store(false, Ordering::Release);
 		self.worker_handler.take().map(|h| {
 			h.join().unwrap()
 		}).unwrap();
+		r.unwrap();
 	}
 }
