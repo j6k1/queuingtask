@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use std::sync::PoisonError;
 use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Sender};
 use std::thread::JoinHandle;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -14,7 +14,7 @@ pub enum Notify {
 	Quit,
 }
 pub struct ThreadQueue {
-	sender_map:Arc<RwLock<HashMap<usize,Sender<Notify>>>>,
+	sender_map:Arc<RwLock<HashMap<usize,(Sender<Notify>,bool)>>>,
 	sender:Sender<Notify>,
 	last_id:Arc<RwLock<usize>>,
 	working:Arc<AtomicBool>,
@@ -29,7 +29,7 @@ impl ThreadQueue {
 		let working = Arc::new(AtomicBool::new(true));
 		let busy_count = Arc::new(AtomicUsize::new(0));
 
-		let sender_map = Arc::new(RwLock::new(HashMap::<usize,Sender<Notify>>::new()));
+		let sender_map = Arc::new(RwLock::new(HashMap::<usize,(Sender<Notify>,bool)>::new()));
 
 		let h = {
 			let sender_map = Arc::clone(&sender_map);
@@ -47,9 +47,13 @@ impl ThreadQueue {
 					match sr.recv().unwrap() {
 						Notify::Started(id) => {
 							if id == current_id {
-								sender_map.read()
-									.unwrap().get(&id)
-									.unwrap().send(Notify::Go).unwrap();
+								match sender_map.read().unwrap().get(&id) {
+									Some((ref sender, false)) => {
+										sender.send(Notify::Go).unwrap();
+									},
+									_ => ()
+								}
+
 							}
 						},
 						Notify::Terminated(id) => {
@@ -59,8 +63,9 @@ impl ThreadQueue {
 										map.remove(&id);
 										let id = id + 1;
 										current_id = id;
-										match map.get(&id) {
-											Some(ref sender) => {
+										match map.get_mut(&id) {
+											Some((ref sender, ref mut started)) => {
+												*started = true;
 												sender.send(Notify::Go).unwrap();
 											},
 											None => ()
@@ -108,7 +113,7 @@ impl ThreadQueue {
 	}
 
 	pub fn submit<F,T>(&mut self,f:F) ->
-		Result<JoinHandle<T>,PoisonError<RwLockWriteGuard<'_,HashMap<usize,Sender<Notify>>>>>
+		Result<JoinHandle<T>,PoisonError<RwLockWriteGuard<'_,HashMap<usize,(Sender<Notify>,bool)>>>>
 		where F: FnOnce() -> T, F: Send + 'static, T: Send + 'static {
 
 		let (cs,cr) = mpsc::channel();
@@ -116,7 +121,7 @@ impl ThreadQueue {
 		match self.last_id.write().unwrap() {
 			mut last_id => {
 				{
-					self.sender_map.write()?.insert(*last_id, cs.clone());
+					self.sender_map.write()?.insert(*last_id, (cs.clone(),false));
 				}
 
 				let ss = self.sender.clone();
